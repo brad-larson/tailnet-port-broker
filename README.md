@@ -82,9 +82,15 @@ through except:
 - `serve`/`funnel` on a tailnet port **leased to another checkout**
 - `serve`/`funnel` **over an existing route to a different app** (re-pointing
   the same local port, e.g. from `127.0.0.1` to `localhost`, is allowed)
-- `serve`/`funnel` at **`127.0.0.1` or a bare port**. The refusal prints the
-  `http://localhost:` command to type instead
 - `serve reset`, which removes every route on the machine
+
+A target at **`127.0.0.1` or a bare port** is let through with a note, not
+refused. It is wrong for a server on the IPv6 wildcard (`next dev`'s default)
+and exactly right for one bound to 127.0.0.1 on purpose. 5seasons'
+`dev-queue-preview` binds that way so the plain-HTTP port never reaches the
+tailnet, and the first version of this shim refused it, breaking every one of
+its previews. `ports serve` always writes `http://localhost:<port>`, which
+reaches a server on either stack.
 
 With no `--https` flag, `serve` targets port 443, and the shim checks it that way.
 `TAILNET_PORTS_FORCE=1` bypasses the shim. If the broker is broken, or node is

@@ -9,10 +9,10 @@
 //
 //   serve|funnel on a port leased to another checkout      refused
 //   serve|funnel over an existing route to a different app  refused
-//   serve|funnel at 127.0.0.1 or a bare port number         refused (IPv4-only
-//                                                            target; use localhost)
 //   serve reset                                             refused (every route
 //                                                            on the machine)
+//   serve|funnel at 127.0.0.1 or a bare port number         allowed, with a note
+//                                                            (IPv4-only target)
 //
 // TAILNET_PORTS_FORCE=1 bypasses all of it. If the broker itself is broken the
 // shim fails OPEN — a bug here must never take tailscale away.
@@ -73,7 +73,17 @@ function judge(args) {
     }
   }
   if (local !== null && !/localhost|\[::1\]/.test(target)) {
-    return `"${target}" registers an IPv4-only target (http://127.0.0.1:${local}); a dev server on the IPv6\n  wildcard and another app on 127.0.0.1 can share that number, and the route reaches the wrong one.\n  Use: tailscale serve --bg --https=${port} http://localhost:${local}`;
+    // A warning, never a refusal. An IPv4 target is WRONG for a server on the
+    // IPv6 wildcard (next dev's default) and exactly RIGHT for one bound to
+    // 127.0.0.1 on purpose — 5seasons' dev-queue-preview does that so the plain
+    // HTTP port never reaches the tailnet, and refusing it broke every one of
+    // its previews on nigel (2026-09-25). The shim cannot see which server the
+    // caller means, so it says what can go wrong and lets the command through.
+    console.error(
+      `tailscale (ports shim): note — "${target}" dials IPv4 only. Right for a server bound to 127.0.0.1;\n` +
+        `  wrong for one on the IPv6 wildcard (next dev's default), where another app on 127.0.0.1:${local}\n` +
+        `  would answer instead. For that case: http://localhost:${local}`,
+    );
   }
   return null;
 }

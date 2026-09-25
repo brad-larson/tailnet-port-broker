@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { portFree } from "../lib/net.mjs";
 
 const PORTS = fileURLToPath(new URL("../bin/ports.mjs", import.meta.url));
 const SHIM = fileURLToPath(new URL("../bin/tailscale.mjs", import.meta.url));
@@ -68,6 +69,14 @@ function hold(port, host) {
 
 const close = (server) => new Promise((r) => server.close(r));
 
+/** The first port a fresh block would hand out on THIS machine — not a
+ *  hardcoded 20000, which a real dev server may already hold (a test that
+ *  binds it then fails for a reason that has nothing to do with the code). */
+async function firstFree() {
+  for (let p = 20000; p < 20100; p++) if (await portFree(p)) return p;
+  throw new Error("nothing free in 20000-20099");
+}
+
 test("a claim is stable, and the tailnet port is local + 10000", (t) => {
   const s = sandbox();
   t.after(s.cleanup);
@@ -113,23 +122,25 @@ test("a port held on IPv4 loopback only is not handed out", async (t) => {
   // The 5seasons collision: another app on 127.0.0.1:<n> while a wildcard bind
   // test would still call <n> free.
   const s = sandbox();
-  const server = await hold(20000, "127.0.0.1");
+  const first = await firstFree();
+  const server = await hold(first, "127.0.0.1");
   t.after(async () => {
     await close(server);
     s.cleanup();
   });
   const a = s.json("claim", "--project", "alpha", "--name", "one");
-  assert.notEqual(a.port, 20000);
+  assert.notEqual(a.port, first);
 });
 
 test("a port held on the wildcard is not handed out", async (t) => {
   const s = sandbox();
-  const server = await hold(20000);
+  const first = await firstFree();
+  const server = await hold(first);
   t.after(async () => {
     await close(server);
     s.cleanup();
   });
-  assert.notEqual(s.json("claim", "--project", "alpha", "--name", "one").port, 20000);
+  assert.notEqual(s.json("claim", "--project", "alpha", "--name", "one").port, first);
 });
 
 test("a tailnet port somebody already routes is skipped", (t) => {
@@ -307,14 +318,30 @@ test("shim: re-pointing a route at the same local port is allowed", (t) => {
   assert.equal(s.routeOf(8446), "http://localhost:3074");
 });
 
-test("shim: refuses the IPv4-only forms and says what to type", (t) => {
+test("shim: lets the IPv4-only forms through, with a note — a server bound to 127.0.0.1 needs them", (t) => {
+  // 5seasons' dev-queue-preview binds 127.0.0.1 on purpose and serves
+  // http://127.0.0.1:<port>. Refusing that broke every one of its previews.
   const s = sandbox();
   t.after(s.cleanup);
-  for (const target of ["3012", "127.0.0.1:3012", "http://127.0.0.1:3012"]) {
-    const r = s.shim(["serve", "--bg", "--https=8499", target]);
-    assert.equal(r.status, 1, target);
-    assert.match(r.stderr, /--https=8499 http:\/\/localhost:3012/);
+  for (const [i, target] of ["3012", "127.0.0.1:3012", "http://127.0.0.1:3012"].entries()) {
+    const port = 8497 + i;
+    const r = s.shim(["serve", "--bg", `--https=${port}`, target]);
+    assert.equal(r.status, 0, `${target}: ${r.stderr}`);
+    assert.match(r.stderr, /dials IPv4 only/);
+    assert.equal(s.routeOf(port), "http://127.0.0.1:3012");
   }
+});
+
+test("shim: dev-queue-preview's exact start and stop sequence works", (t) => {
+  const s = sandbox();
+  t.after(s.cleanup);
+  s.route(8443, "http://127.0.0.1:3008"); // another worktree's preview, already there
+  assert.equal(s.shim(["serve", "status"]).status, 0);
+  assert.equal(s.shim(["serve", "--bg", "--https=8444", "http://127.0.0.1:3012"]).status, 0);
+  assert.equal(s.routeOf(8444), "http://127.0.0.1:3012");
+  assert.equal(s.shim(["serve", "--https=8444", "off"]).status, 0);
+  assert.equal(s.routeOf(8444), undefined);
+  assert.ok(s.routeOf(8443));
 });
 
 test("shim: no port flag means 443", (t) => {
