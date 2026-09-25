@@ -62,7 +62,8 @@ EOF
     *":$shimdir:"*) echo "shim directory is already on PATH" ;;
     *)
       echo
-      echo "Put the shim ahead of the real CLI — ~/.zshenv, so agents' non-interactive shells get it too:"
+      echo "Put the shim ahead of the real CLI. Add this line to ~/.zshenv, ~/.zprofile AND the end of ~/.zshrc"
+      echo "(path_helper and version managers each reorder PATH after .zshenv — README, Install):"
       echo "  export PATH=\"\$HOME/.local/share/tailnet-ports/shim:\$PATH\""
       ;;
   esac

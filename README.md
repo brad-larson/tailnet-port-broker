@@ -64,7 +64,8 @@ cannot see each other, and a 5seasons agent never reads Brain's docs.
 | `ports unserve [project:name]` | take the route down, only if it is still ours |
 | `ports release [project:name]` | route down and lease given back. Do this when the worktree goes away |
 | `ports ls [--json]` | every lease (listening? route ours/stolen? checkout gone?) and every route set by hand |
-| `ports gc [--dry-run] [--routes]` | release leases whose checkout is gone **and** whose port is silent. `--routes` also turns off routes with no lease whose local target has nothing listening |
+| `ports gc [--dry-run]` | release leases whose checkout is gone **and** whose port is silent. It lists hand-set routes to a silent port but never turns them off |
+| `ports unroute <port>...` | turn off a hand-set route once you know it is dead. Refuses a leased port, and a target that is answering unless `--force` |
 | `ports whose <port>` | who holds a local or tailnet port |
 
 With no arguments, identity comes from git: the project is the main checkout's
@@ -95,9 +96,24 @@ never take tailscale away.
 ```sh
 git clone git@github.com:brad-larson/tailnet-port-broker.git ~/coding/tailnet-port-broker
 ~/coding/tailnet-port-broker/install.sh --shim
-# then, in ~/.zshenv (not .zshrc — agents run non-interactive shells):
+```
+
+Then put this line in **three** files: `~/.zshenv`, `~/.zprofile`, and the end
+of `~/.zshrc`:
+
+```sh
 export PATH="$HOME/.local/share/tailnet-ports/shim:$PATH"
 ```
+
+All three are needed on macOS. `.zshenv` is the only file a plain `zsh -c`
+reads. Login shells then run `/etc/zprofile`, whose `path_helper` moves
+`/opt/homebrew/bin` (from `/etc/paths.d/homebrew`) back ahead of the shim, so
+`.zprofile` has to prepend it again. `.zshrc` rebuilds PATH itself (asdf, mise),
+so interactive shells need the line after that. Check with
+`for f in -c -lc -ic -lic; do zsh $f 'command -v tailscale'; done`: all four
+should print the shim. A shell that was already running keeps its old PATH, so
+agent sessions that were open before the install get the shim only once they
+restart.
 
 Zero dependencies, Node ≥ 20. Leases are per machine (`~/.config/tailnet-ports/`,
 or `$TAILNET_PORTS_HOME`), because ports are per machine.
@@ -118,8 +134,12 @@ Never pick a port or run `tailscale serve` by hand. In your checkout:
 
 Hand-set routes keep working. `ports ls` lists them under *Routes with no
 lease*, claims skip their ports, and the shim refuses to overwrite them.
-`ports gc --routes --dry-run` shows the dead ones; drop `--dry-run` to turn them
-off.
+
+Nothing turns them off automatically. A hand-set route has no lease, so there
+is no checkout to check, and a worktree whose server is merely stopped looks
+exactly like a dead one. On nigel, 5 of 7 silent routes still belonged to live
+worktrees. Find the owner (a worktree's `.env`/`.env.local` naming the port is
+the usual tell), then `ports unroute <port>`.
 
 ## Not done
 

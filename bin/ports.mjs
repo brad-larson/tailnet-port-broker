@@ -23,9 +23,11 @@ const HELP = `ports — host-wide broker for dev ports and tailnet previews
   ports unserve [project:name]          take this lease's route down
   ports release [project:name]          route down and lease given back
   ports ls      [--json]                every lease and every route on this host
-  ports gc      [--dry-run] [--routes]  release leases whose checkout is gone and
-                                        whose port is silent; --routes also turns
-                                        off unleased routes to a silent local port
+  ports gc      [--dry-run]             release leases whose checkout is gone and
+                                        whose port is silent
+  ports unroute <tailnet-port>...       turn off a route set by hand, once you know
+                                        it is dead; refuses a leased port or a live
+                                        target (--force for the latter)
   ports whose   <port>                  who holds a local or tailnet port
 
 With no flags, project and worktree come from git: the main checkout's
@@ -261,16 +263,38 @@ async function cmdGc(opts) {
       say(`release ${l.key} (${l.port}/${l.tailnetPort}; checkout gone; route ${route})`);
       n++;
     }
-    if (opts.routes) {
-      for (const r of unleased) {
-        if (r.up !== false) continue; // a live target, or not a local one: not ours to judge
-        if (!dry) ts.unserve(r.port);
-        say(`turn off :${r.port} → ${r.target} (unleased, nothing listening)`);
-        n++;
-      }
-    }
     if (!dry) save(state);
     if (!n) console.log("nothing to collect");
+    // Hand-set routes are never collected automatically: with no lease there is
+    // no checkout to look at, and a worktree whose server is merely stopped looks
+    // exactly like a dead one. On nigel, 2026-09-25, 5 of 7 silent routes still
+    // belonged to live worktrees.
+    const silent = unleased.filter((r) => r.up === false);
+    if (silent.length) {
+      console.log(`\n${silent.length} hand-set route(s) point at a silent port — possibly a stopped server, not a dead one:`);
+      for (const r of silent) console.log(`  :${r.port} → ${r.target}`);
+      console.log("Find the owner first; `ports unroute <port>` once you know it is dead.");
+    }
+  });
+}
+
+async function cmdUnroute(opts) {
+  const ports = opts._.slice(1).map(Number);
+  if (!ports.length || ports.some((p) => !Number.isInteger(p))) throw new Refusal("usage: ports unroute <tailnet-port>...");
+  await withLock(async () => {
+    const { leases, unleased } = await inventory();
+    for (const port of ports) {
+      const lease = leases.find((l) => l.tailnetPort === port);
+      if (lease) throw new Refusal(`:${port} is leased to ${lease.key}; \`ports release ${lease.key}\` instead`);
+      const route = unleased.find((r) => r.port === port);
+      if (!route) {
+        console.log(`:${port}: no route`);
+        continue;
+      }
+      if (route.up && !opts.force) throw new Refusal(`:${port} → ${route.target} is answering; --force if you mean it`);
+      ts.unserve(port);
+      console.log(`:${port} → ${route.target}: off`);
+    }
   });
 }
 
@@ -298,6 +322,7 @@ const COMMANDS = {
   release: cmdRelease,
   ls: cmdLs,
   gc: cmdGc,
+  unroute: cmdUnroute,
   whose: cmdWhose,
 };
 

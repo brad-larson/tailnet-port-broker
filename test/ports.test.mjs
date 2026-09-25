@@ -210,7 +210,17 @@ test("gc releases a lease only when its checkout is gone AND its port is silent"
   assert.ok(s.routeOf(h.tailnetPort));
 });
 
-test("gc --routes turns off unleased routes to a silent port, and only those", async (t) => {
+test("gc never turns off a hand-set route — a stopped server looks dead — but names the silent ones", async (t) => {
+  const s = sandbox();
+  t.after(s.cleanup);
+  s.route(8451, "http://127.0.0.1:20554"); // nothing there: dead, or a worktree between servers
+  const r = s.ports("gc");
+  assert.equal(r.status, 0);
+  assert.ok(s.routeOf(8451));
+  assert.match(r.stdout, /:8451 → http:\/\/127\.0\.0\.1:20554/);
+});
+
+test("unroute turns off a silent hand-set route, and refuses a live one or a leased one", async (t) => {
   const s = sandbox();
   const server = await hold(20555);
   t.after(async () => {
@@ -219,13 +229,22 @@ test("gc --routes turns off unleased routes to a silent port, and only those", a
   });
   s.route(8451, "http://127.0.0.1:20554"); // nothing there
   s.route(8454, "http://localhost:20555"); // live
-  s.route(443, "path:/srv/www"); // not a local port: not ours to judge
-  assert.equal(s.ports("gc").status, 0);
-  assert.ok(s.routeOf(8451), "plain gc leaves hand-set routes alone");
-  assert.equal(s.ports("gc", "--routes").status, 0);
+  const a = s.json("serve", "--project", "alpha", "--name", "one");
+
+  assert.equal(s.ports("unroute", "8451").status, 0);
   assert.equal(s.routeOf(8451), undefined);
+
+  const live = s.ports("unroute", "8454");
+  assert.equal(live.status, 1);
+  assert.match(live.stderr, /is answering/);
   assert.ok(s.routeOf(8454));
-  assert.ok(s.routeOf(443));
+  assert.equal(s.ports("unroute", "8454", "--force").status, 0);
+  assert.equal(s.routeOf(8454), undefined);
+
+  const leased = s.ports("unroute", String(a.tailnetPort));
+  assert.equal(leased.status, 1);
+  assert.match(leased.stderr, /leased to alpha:one/);
+  assert.ok(s.routeOf(a.tailnetPort));
 });
 
 test("a lock left by a dead process is taken over", (t) => {
