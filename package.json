@@ -1,0 +1,16 @@
+{
+  "name": "tailnet-port-broker",
+  "version": "0.1.0",
+  "description": "Host-wide broker for dev-server ports and their tailscale serve routes, so projects and worktrees stop clobbering each other.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "ports": "bin/ports.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}
