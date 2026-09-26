@@ -29,8 +29,28 @@ if [ -z "$bin" ]; then
 fi
 [ -n "$bin" ] || { echo "no writable bin directory found; pass --bin DIR" >&2; exit 1; }
 
-ln -sf "$repo/bin/ports.mjs" "$bin/ports"
-echo "ports → $bin/ports"
+# node's absolute path, taken now. A version manager (asdf, mise) often puts
+# node on PATH only from ~/.zshrc, so a shell that never reads it — `zsh -c`,
+# launchd, a script's child — has none. Found on brad-dev 2026-09-26, where the
+# shim then fell back to the real CLI unguarded and a test serve replaced a
+# live route. The baked path goes stale when node is upgraded, so PATH is the
+# fallback, and re-running this script refreshes it.
+node_bin=$(node -p process.execPath 2>/dev/null || true)
+[ -n "$node_bin" ] || { echo "node not found on PATH; install it (>= 20) first" >&2; exit 1; }
+find_node="NODE='$node_bin'; [ -x \"\$NODE\" ] || NODE=\$(command -v node) || NODE=''"
+
+# A shell wrapper, not a symlink to the .mjs, for the same reason: the .mjs's
+# `#!/usr/bin/env node` fails outright wherever node is not on PATH.
+rm -f "$bin/ports"
+cat > "$bin/ports" <<EOF
+#!/bin/sh
+# Written by $repo/install.sh
+$find_node
+[ -n "\$NODE" ] || { echo "ports: node not found (re-run $repo/install.sh)" >&2; exit 1; }
+exec "\$NODE" '$repo/bin/ports.mjs' "\$@"
+EOF
+chmod +x "$bin/ports"
+echo "ports → $bin/ports (node $node_bin)"
 
 if [ "$shim" = 1 ]; then
   shimdir="$HOME/.local/share/tailnet-ports/shim"
@@ -45,15 +65,19 @@ if [ "$shim" = 1 ]; then
   [ -n "$real" ] || { echo "no tailscale CLI found on PATH" >&2; exit 1; }
 
   mkdir -p "$shimdir"
-  # A shell wrapper rather than a symlink to the .mjs: when node is missing
-  # (a fresh shell before mise, a stripped-down PATH) it runs the real CLI
-  # instead of failing — the shim must never be the reason tailscale broke.
+  # When node cannot be found at all it runs the real CLI instead of failing —
+  # the shim must never be the reason tailscale broke — but says so, because a
+  # silent fallback is a guard that is off while reading as on.
   cat > "$shimdir/tailscale" <<EOF
 #!/bin/sh
 # Written by $repo/install.sh — refuses tailscale serve commands that would
 # take a port from another project. TAILNET_PORTS_FORCE=1 bypasses it.
 REAL='$real'
-NODE=\$(command -v node) || exec "\$REAL" "\$@"
+$find_node
+if [ -z "\$NODE" ]; then
+  echo "tailscale (ports shim): node not found — running the real CLI UNGUARDED (re-run $repo/install.sh)" >&2
+  exec "\$REAL" "\$@"
+fi
 TAILSCALE_BIN="\$REAL" exec "\$NODE" '$repo/bin/tailscale.mjs' "\$@"
 EOF
   chmod +x "$shimdir/tailscale"
