@@ -18,7 +18,7 @@
 // shim fails OPEN — a bug here must never take tailscale away.
 import { spawnSync } from "node:child_process";
 import { identify } from "../lib/identify.mjs";
-import { keyOf, load } from "../lib/state.mjs";
+import { keyOf, load, ownsTailnet } from "../lib/state.mjs";
 import { realTailscale, routes, targetPort } from "../lib/tailscale.mjs";
 
 const VALUE_FLAGS = new Set(["https", "http", "tcp", "tls-terminated-tcp", "set-path", "service", "proxy-protocol", "accept-app-caps"]);
@@ -59,7 +59,7 @@ function judge(args) {
       return null;
     }
   })();
-  const owner = Object.entries(load().leases).find(([, l]) => l.tailnetPort === port);
+  const owner = Object.entries(load().leases).find(([, l]) => ownsTailnet(l, port));
   if (owner && owner[0] !== me) {
     return `tailnet :${port} is leased to ${owner[0]} (${owner[1].path}).\n  \`ports serve\` gives this checkout a port of its own.`;
   }

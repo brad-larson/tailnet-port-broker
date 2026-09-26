@@ -43,6 +43,11 @@ cannot see each other, and a 5seasons agent never reads Brain's docs.
   allocated on first use and recorded. You never maintain a table by hand.
 - **The tailnet port is always the local port + 10000.** Local 20114 is
   `https://<host>:30114`, so there is only one number to remember.
+- **A lease can be a block.** `--count 10` leases ten contiguous local ports and
+  the ten tailnet ports beside them (each + 10000). Meridian runs web, api, pdf
+  and mcp per worktree and routes three of them. One lease covering the whole
+  block is what lets the shim refuse another checkout on any of them, and lets
+  `release` take every route down. A lease never changes size in place.
 - **A port is free only if nothing answers on *either* loopback** and the IPv6
   wildcard binds. Brain's `wt:up` once handed out a port someone was
   already serving on, because the only check was a bind test.
@@ -59,7 +64,7 @@ cannot see each other, and a 5seasons agent never reads Brain's docs.
 
 | | |
 |---|---|
-| `ports claim [--env\|--json]` | this checkout's lease. `--env` prints `PORT=`, `TAILNET_PORT=`, `PREVIEW_URL=` |
+| `ports claim [--count N] [--env\|--json]` | this checkout's lease. `--env` prints `PORT=`, `TAILNET_PORT=`, `PREVIEW_URL=`. `--count N` leases N contiguous ports and the N tailnet ports beside them, as one lease |
 | `ports serve` | claim, then route the tailnet port → `http://localhost:<port>`. Refuses if someone has since routed over it |
 | `ports unserve [project:name]` | take the route down, only if it is still ours |
 | `ports release [project:name]` | route down and lease given back. Do this when the worktree goes away |

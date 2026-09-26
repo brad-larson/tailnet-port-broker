@@ -9,14 +9,15 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { identify } from "../lib/identify.mjs";
 import { listening, portFree } from "../lib/net.mjs";
-import { BLOCK, TAILNET_OFFSET, blockFor, keyOf, load, save, withLock } from "../lib/state.mjs";
+import { BLOCK, TAILNET_OFFSET, blockFor, keyOf, load, localPortsOf, ownsLocal, ownsTailnet, save, span, withLock } from "../lib/state.mjs";
 import * as ts from "../lib/tailscale.mjs";
 
 const HELP = `ports — host-wide broker for dev ports and tailnet previews
 
-  ports claim   [--project P] [--name N] [--path DIR] [--env|--json]
-                  this checkout's lease: a local port and its tailnet port.
-                  Same answer every time for the same project:worktree.
+  ports claim   [--project P] [--name N] [--path DIR] [--count N] [--env|--json]
+                  this checkout's lease: a local port and its tailnet port —
+                  or, with --count, N contiguous ports and the N tailnet ports
+                  beside them. Same answer every time for the same project:worktree.
   ports serve   [same flags]            claim, then route https://<host>:<tailnet>
                                         → http://localhost:<port>, refusing to
                                         replace anyone else's route
@@ -46,11 +47,17 @@ function parse(argv) {
     }
     const [k, v] = a.slice(2).split(/=(.*)/s);
     if (v !== undefined) opts[k] = v;
-    else if (["project", "name", "path"].includes(k)) opts[k] = argv[++i];
+    else if (["project", "name", "path", "count"].includes(k)) opts[k] = argv[++i];
     else opts[k] = true;
   }
   return opts;
 }
+
+/** "20114/30114", or "20200-20209/30200-30209" for a block. */
+const range = (l) =>
+  span(l) > 1
+    ? `${l.port}-${l.port + span(l) - 1}/${l.tailnetPort}-${l.tailnetPort + span(l) - 1}`
+    : `${l.port}/${l.tailnetPort}`;
 
 const tilde = (p) => (p.startsWith(homedir()) ? `~${p.slice(homedir().length)}` : p);
 
@@ -80,30 +87,48 @@ function keyFor(opts) {
   return keyOf(id.project, id.name);
 }
 
-async function claim(state, id, routes) {
+function countOf(opts) {
+  const count = opts.count === undefined ? 1 : Number(opts.count);
+  if (!Number.isInteger(count) || count < 1 || count > BLOCK) throw new Refusal(`--count must be 1-${BLOCK}`);
+  return count;
+}
+
+async function claim(state, id, routes, count = 1) {
   const key = keyOf(id.project, id.name);
   const held = state.leases[key];
   if (held) {
+    // A lease never changes size in place: its neighbours may already be
+    // somebody else's. Asking for a different size is a mistake to say out loud.
+    if (span(held) !== count) {
+      throw new Refusal(`${key} holds ${span(held)} port(s), not ${count}; \`ports release ${key}\` first`);
+    }
     held.path = id.path;
     return { key, lease: held, fresh: false };
   }
   const base = blockFor(state, id.project);
-  const taken = new Set(Object.values(state.leases).map((l) => l.port));
-  for (let port = base; port < base + BLOCK; port++) {
-    if (taken.has(port) || routes.has(port + TAILNET_OFFSET)) continue;
-    if (!(await portFree(port))) continue;
+  const taken = new Set(Object.values(state.leases).flatMap(localPortsOf));
+  const usable = async (port) =>
+    !taken.has(port) && !routes.has(port + TAILNET_OFFSET) && (await portFree(port));
+  outer: for (let port = base; port + count <= base + BLOCK; port++) {
+    for (let p = port; p < port + count; p++) {
+      if (!(await usable(p))) {
+        port = p; // nothing starting at or before p can span it
+        continue outer;
+      }
+    }
     const lease = {
       project: id.project,
       name: id.name,
       path: id.path,
       port,
       tailnetPort: port + TAILNET_OFFSET,
+      ...(count > 1 ? { count } : {}),
       claimedAt: new Date().toISOString(),
     };
     state.leases[key] = lease;
     return { key, lease, fresh: true };
   }
-  throw new Error(`${id.project}'s block ${base}-${base + BLOCK - 1} is full — \`ports gc\`, then \`ports ls\``);
+  throw new Error(`${id.project}'s block ${base}-${base + BLOCK - 1} has no ${count} free port(s) in a row — \`ports gc\`, then \`ports ls\``);
 }
 
 function report(opts, key, lease, extra = {}) {
@@ -113,6 +138,7 @@ function report(opts, key, lease, extra = {}) {
   } else if (opts.env) {
     console.log(`PORT=${lease.port}`);
     console.log(`TAILNET_PORT=${lease.tailnetPort}`);
+    if (span(lease) > 1) console.log(`PORT_COUNT=${span(lease)}`);
     if (preview) console.log(`PREVIEW_URL=${preview}`);
   } else {
     console.log(`${key}${extra.fresh ? "  (new lease)" : ""}`);
@@ -126,7 +152,7 @@ async function cmdClaim(opts) {
   const { key, lease, fresh, routed } = await withLock(async () => {
     const state = load();
     const routes = routesOrEmpty();
-    const out = await claim(state, id, routes);
+    const out = await claim(state, id, routes, countOf(opts));
     save(state);
     return { ...out, routed: routes.get(out.lease.tailnetPort) === ts.localTarget(out.lease.port) };
   });
@@ -138,7 +164,7 @@ async function cmdServe(opts) {
   const { key, lease, fresh } = await withLock(async () => {
     const state = load();
     const routes = ts.routes();
-    const out = await claim(state, id, routes);
+    const out = await claim(state, id, routes, countOf(opts));
     save(state);
     const { tailnetPort: port } = out.lease;
     const target = ts.localTarget(out.lease.port);
@@ -166,13 +192,25 @@ async function cmdServe(opts) {
   }
 }
 
-/** Take a lease's route down if — and only if — it is still ours. */
+/** Is the route on tailnet port `t` this lease's own? Only when it points at the
+ *  local port beside it — any other target is somebody's, whatever the number. */
+const ourRoute = (lease, t, target) => ownsTailnet(lease, t) && target === ts.localTarget(t - TAILNET_OFFSET);
+
+/** Take a lease's routes down if — and only if — they are still ours. */
 function dropRoute(lease, routes) {
-  const current = routes.get(lease.tailnetPort);
-  if (!current) return "none";
-  if (current !== ts.localTarget(lease.port)) return `left alone — routes to ${current}, not this lease`;
-  ts.unserve(lease.tailnetPort);
-  return "off";
+  const out = [];
+  for (const local of localPortsOf(lease)) {
+    const t = local + TAILNET_OFFSET;
+    const current = routes.get(t);
+    if (!current) continue;
+    if (!ourRoute(lease, t, current)) {
+      out.push(`:${t} left alone — routes to ${current}, not this lease`);
+      continue;
+    }
+    ts.unserve(t);
+    out.push(span(lease) > 1 ? `:${t} off` : "off");
+  }
+  return out.length ? out.join(", ") : "none";
 }
 
 async function cmdUnserve(opts) {
@@ -191,7 +229,7 @@ async function cmdRelease(opts) {
     const route = dropRoute(lease, routesOrEmpty());
     delete state.leases[key];
     save(state);
-    console.log(`${key}: released ${lease.port}/${lease.tailnetPort}, route ${route}`);
+    console.log(`${key}: released ${range(lease)}, route ${route}`);
   });
 }
 
@@ -200,15 +238,24 @@ async function inventory() {
   const routes = routesOrEmpty();
   const leases = await Promise.all(
     Object.entries(state.leases).map(async ([key, l]) => {
-      const current = routes.get(l.tailnetPort);
-      const route = !current ? "none" : current === ts.localTarget(l.port) ? "ours" : `STOLEN → ${current}`;
-      return { key, ...l, up: await listening(l.port), route, pathExists: existsSync(l.path) };
+      let ours = 0;
+      let stolen = null;
+      for (const local of localPortsOf(l)) {
+        const t = local + TAILNET_OFFSET;
+        const current = routes.get(t);
+        if (!current) continue;
+        if (ourRoute(l, t, current)) ours++;
+        else stolen ??= `STOLEN :${t} → ${current}`;
+      }
+      const route = stolen ?? (ours === 0 ? "none" : span(l) > 1 ? `ours (${ours})` : "ours");
+      const up = (await Promise.all(localPortsOf(l).map(listening))).some(Boolean);
+      return { key, ...l, up, route, pathExists: existsSync(l.path) };
     }),
   );
-  const leased = new Set(Object.values(state.leases).map((l) => l.tailnetPort));
+  const leasedTailnet = (port) => Object.values(state.leases).some((l) => ownsTailnet(l, port));
   const unleased = await Promise.all(
     [...routes]
-      .filter(([port]) => !leased.has(port))
+      .filter(([port]) => !leasedTailnet(port))
       .map(async ([port, target]) => {
         const local = ts.targetPort(target);
         return { port, target, up: local === null ? null : await listening(local) };
@@ -233,7 +280,9 @@ async function cmdLs(opts) {
       ["LEASE", "PORT", "UP", "TAILNET", "ROUTE", "CHECKOUT"],
       ...leases
         .sort((a, b) => a.port - b.port)
-        .map((l) => [l.key, l.port, l.up ? "yes" : "-", l.tailnetPort, l.route, `${l.pathExists ? "" : "(gone) "}${tilde(l.path)}`]),
+        .map((l) => [l.key, span(l) > 1 ? `${l.port}-${l.port + span(l) - 1}` : l.port, l.up ? "yes" : "-",
+          span(l) > 1 ? `${l.tailnetPort}-${l.tailnetPort + span(l) - 1}` : l.tailnetPort, l.route,
+          `${l.pathExists ? "" : "(gone) "}${tilde(l.path)}`]),
     ]);
   } else {
     console.log("no leases");
@@ -260,7 +309,7 @@ async function cmdGc(opts) {
       if (l.pathExists || l.up) continue;
       const route = dry ? (l.route === "ours" ? "off" : l.route) : dropRoute(l, routes);
       delete state.leases[l.key];
-      say(`release ${l.key} (${l.port}/${l.tailnetPort}; checkout gone; route ${route})`);
+      say(`release ${l.key} (${range(l)}; checkout gone; route ${route})`);
       n++;
     }
     if (!dry) save(state);
@@ -284,7 +333,7 @@ async function cmdUnroute(opts) {
   await withLock(async () => {
     const { leases, unleased } = await inventory();
     for (const port of ports) {
-      const lease = leases.find((l) => l.tailnetPort === port);
+      const lease = leases.find((l) => ownsTailnet(l, port));
       if (lease) throw new Refusal(`:${port} is leased to ${lease.key}; \`ports release ${lease.key}\` instead`);
       const route = unleased.find((r) => r.port === port);
       if (!route) {
@@ -302,9 +351,9 @@ async function cmdWhose(opts) {
   const port = Number(opts._[1]);
   if (!Number.isInteger(port)) throw new Refusal("usage: ports whose <port>");
   const { leases, unleased } = await inventory();
-  const lease = leases.find((l) => l.port === port || l.tailnetPort === port);
+  const lease = leases.find((l) => ownsLocal(l, port) || ownsTailnet(l, port));
   if (lease) {
-    console.log(`${lease.key}  ${lease.port} → :${lease.tailnetPort}  ${tilde(lease.path)}  route ${lease.route}`);
+    console.log(`${lease.key}  ${range(lease)}  ${tilde(lease.path)}  route ${lease.route}`);
     return;
   }
   const route = unleased.find((r) => r.port === port || ts.targetPort(r.target) === port);

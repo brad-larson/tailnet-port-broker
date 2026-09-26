@@ -398,3 +398,82 @@ test("shim: the owner of a lease may serve and take down its own port", (t) => {
   assert.equal(s.shim(["serve", `--https=${a.tailnetPort}`, "off"]).status, 0);
   assert.equal(s.routeOf(a.tailnetPort), undefined);
 });
+
+// --- block leases (--count) ------------------------------------------------
+// Meridian runs web, api, pdf and mcp per worktree and routes three of them;
+// one lease has to cover all of it, or the shim cannot tell whose they are.
+
+test("a block lease is contiguous, stable, and never overlaps another lease", (t) => {
+  const s = sandbox();
+  t.after(s.cleanup);
+  const one = s.json("claim", "--project", "alpha", "--name", "single");
+  const a = s.json("claim", "--project", "alpha", "--name", "block", "--count", "10");
+  assert.equal(a.count, 10);
+  assert.equal(a.tailnetPort, a.port + 10000);
+  assert.ok(a.port > one.port, "the block starts after the single lease, not across it");
+  assert.equal(s.json("claim", "--project", "alpha", "--name", "block", "--count", "10").port, a.port);
+  const b = s.json("claim", "--project", "alpha", "--name", "block2", "--count", "10");
+  assert.ok(b.port >= a.port + 10, `${b.port} overlaps ${a.port}-${a.port + 9}`);
+});
+
+test("a block skips past a busy port inside it", async (t) => {
+  const s = sandbox();
+  const first = await firstFree();
+  const server = await hold(first + 3);
+  t.after(async () => {
+    await close(server);
+    s.cleanup();
+  });
+  const a = s.json("claim", "--project", "alpha", "--name", "block", "--count", "5");
+  assert.ok(a.port > first + 3, `${a.port}-${a.port + 4} spans the busy ${first + 3}`);
+});
+
+test("a lease does not change size in place", (t) => {
+  const s = sandbox();
+  t.after(s.cleanup);
+  s.json("claim", "--project", "alpha", "--name", "block", "--count", "4");
+  const r = s.ports("claim", "--project", "alpha", "--name", "block", "--count", "10");
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /holds 4 port\(s\), not 10/);
+});
+
+test("release turns off every route in a block that is still ours, and only those", (t) => {
+  const s = sandbox();
+  t.after(s.cleanup);
+  const a = s.json("claim", "--project", "alpha", "--name", "block", "--count", "10");
+  s.route(a.tailnetPort, `http://localhost:${a.port}`);
+  s.route(a.tailnetPort + 1, `http://localhost:${a.port + 1}`);
+  s.route(a.tailnetPort + 3, "http://localhost:4444"); // someone else's, inside our range
+  const ls = s.json("ls").leases[0];
+  assert.match(ls.route, /STOLEN :\d+ → http:\/\/localhost:4444/);
+  assert.equal(s.ports("release", "alpha:block").status, 0);
+  assert.equal(s.routeOf(a.tailnetPort), undefined);
+  assert.equal(s.routeOf(a.tailnetPort + 1), undefined);
+  assert.equal(s.routeOf(a.tailnetPort + 3), "http://localhost:4444");
+});
+
+test("shim: every tailnet port in a block belongs to its owner", (t) => {
+  const s = sandbox();
+  t.after(s.cleanup);
+  const owner = basename(s.dir).toLowerCase();
+  const a = s.json("claim", "--count", "10"); // this checkout: <dir>:root
+  assert.equal(a.key, `${owner}:root`);
+  // The owner serves its sixth slot (web+5 → how Meridian's https slots sit).
+  const mine = s.shim(["serve", "--bg", `--https=${a.tailnetPort + 5}`, `http://localhost:${a.port + 5}`]);
+  assert.equal(mine.status, 0, mine.stderr);
+  // Another checkout may not take any port in the range.
+  const elsewhere = join(s.dir, "elsewhere");
+  mkdirSync(elsewhere);
+  const r = s.shim(["serve", "--bg", `--https=${a.tailnetPort + 7}`, "http://localhost:3999"], elsewhere);
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, new RegExp(`leased to ${owner}:root`));
+});
+
+test("whose names the block lease for any port inside it", (t) => {
+  const s = sandbox();
+  t.after(s.cleanup);
+  const a = s.json("claim", "--project", "alpha", "--name", "block", "--count", "10");
+  assert.match(s.ports("whose", String(a.port + 9)).stdout, /alpha:block/);
+  assert.match(s.ports("whose", String(a.tailnetPort + 9)).stdout, /alpha:block/);
+  assert.doesNotMatch(s.ports("whose", String(a.port + 10)).stdout, /alpha:block/);
+});
