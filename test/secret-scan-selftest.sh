@@ -10,7 +10,7 @@ CONFIG="$(cd "$(dirname "$0")/.." && pwd)/.gitleaks.toml"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
-rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
+rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1" || true; }
 b64url() { printf '%s' "$1" | base64 | tr -d '=\n' | tr '/+' '_-'; }
 jwt() { echo "$(b64url '{"alg":"HS256","typ":"JWT"}').$(b64url "$1").$(rand 43)"; }
 
@@ -38,7 +38,7 @@ check must-pass  local-db-url         'DATABASE_URL=postgres://postgres:postgres
 check must-pass  doc-template-url     'psql "postgresql://postgres:[PASSWORD]@[HOST]:6543/postgres"'
 check must-pass  env-reference        'psql "${SUPABASE_DB_URL:?Set SUPABASE_DB_URL}"'
 check must-pass  supabase-demo-jwt    "LOCAL_KEY=\"$(jwt '{"iss":"supabase-demo","role":"anon","exp":1983812996}')\""
-check must-pass  stripe-publishable   "const pk = 'pk_live_$(rand 99)';"
+check must-pass  stripe-publishable   "STRIPE_PUBLISHABLE_KEY = 'pk_live_$(rand 99)'"
 check must-pass  doc-placeholder      'curl -H "Authorization: Bearer YOUR_API_KEY" http://localhost:8080/acquire'
 check must-flag  real-bearer          "curl -H \"Authorization: Bearer $(rand 40)\" https://api.example.com/v1"
 
