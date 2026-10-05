@@ -1,0 +1,43 @@
+# Secret scan for .github/workflows/secrets.yml.
+#
+# CI scans only the commits a PR or push adds, so this file decides what a NEW
+# commit may contain. History still holds keys committed before the scan
+# existed; those are fixed by rotating them, not by anything here.
+#
+# A false positive on a line you have checked: end that line with a
+# `gitleaks:allow` comment. Never allowlist a real key — remove it and rotate.
+
+[extend]
+useDefault = true
+
+# gitleaks has no rule for a connection string with the password inline.
+# `${VAR}`, `<placeholder>` and `[PASSWORD]` in the password slot are not one.
+[[rules]]
+id = "postgres-url-password"
+description = "Postgres connection string with an inline password"
+regex = '''postgres(?:ql)?://[^:/@\s"'`]+:([^@\s"'`$<{\[]{6,})@[^\s"'`]+'''
+secretGroup = 1
+keywords = ["postgres://", "postgresql://"]
+
+[[rules.allowlists]]
+description = "Local and container databases"
+regexTarget = "match"
+regexes = ['''@(?:localhost|127\.0\.0\.1|0\.0\.0\.0|host\.docker\.internal|db|postgres|supabase_db)(?:[:/]|$)''']
+
+[[allowlists]]
+description = "Public by design: Supabase local-demo JWTs, publishable keys, Stripe publishable keys"
+regexTarget = "match"
+regexes = [
+  # payload begins {"iss":"supabase-demo" — the fixed keys every `supabase start` prints
+  '''eyJ[A-Za-z0-9_-]+\.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIi[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+''',
+  '''sb_publishable_[A-Za-z0-9_-]+''',
+  '''pk_(?:test|live)_[A-Za-z0-9]+''',
+]
+
+
+[[allowlists]]
+description = "Placeholders in docs and examples (YOUR_API_KEY, your-token, example_secret)"
+regexTarget = "secret"
+regexes = ['''(?i)^(?:your|my|example|sample|dummy|fake|placeholder)[_-][a-z_-]*$''']
+
+# Repo-specific allowlists (fixture directories etc.) go below.
